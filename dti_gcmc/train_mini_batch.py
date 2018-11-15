@@ -13,6 +13,8 @@ import scipy.sparse as sp
 import warnings
 warnings.filterwarnings('ignore')
 
+from sklearn.metrics import roc_auc_score
+
 from dti_gcmc.preprocessing import create_trainvaltest_split, \
     sparse_to_tuple, preprocess_user_item_features, globally_normalize_bipartite_adjacency
 from dti_gcmc.model import RecommenderGAE
@@ -75,7 +77,11 @@ ap.add_argument("-st", "--split_type", type=str, default='stratified',
                 help="Type of split for train-test split.")
 
 ap.add_argument("-cw", "--class_weights", type=float, nargs=2, default=[1., 25.],
-                help="The class weights for binary classification")
+                help="The class weights for binary classification.")
+
+ap.add_argument("-sht", "--show_test_results",
+                help="Callback to show continuous results on the test set.", 
+                action='store_true')
 
 # Boolean flags
 fp = ap.add_mutually_exclusive_group(required=False)
@@ -144,6 +150,7 @@ REG = args['regularization']
 STYPE = args['split_type']
 USE_CLASS_WEIGHTS = args['use_class_weights']
 CLASS_WEIGHTS = args['class_weights']
+SHOWTEST = args['show_test_results']
 
 CLASS_WEIGHTS = np.array(CLASS_WEIGHTS).astype('float32')
 
@@ -364,18 +371,39 @@ for epoch in range(NB_EPOCH):
                                                                               model.labels], 
                                                                               feed_dict=val_feed_dict)
 
+            if SHOWTEST:
+                test_avg_loss, test_rmse, test_accuracy, test_auc_with_op, outputs, labels = sess.run([model.loss, 
+                                                                                      model.rmse, 
+                                                                                      model.accuracy, 
+                                                                                      model.auc, 
+                                                                                      model.outputs, 
+                                                                                      model.labels], 
+                                                                                      feed_dict=test_feed_dict)
+
+                test_auc, update_op = test_auc_with_op
+
             val_auc, update_op = auc
             outputs = sess.run(tf.argmax(outputs, 1))
             iteration_time = time.time() - t
             total_time += iteration_time
 
-            if VERBOSE:
+            sk_test_auc = roc_auc_score(labels, outputs)
+
+            if SHOWTEST and VERBOSE:
                 print('[*] Iter: %04d' % (epoch*num_mini_batch + batch_iter),  " Epoch:", '%04d' % epoch,
                       "minibatch iter:", '%04d' % batch_iter,
                       "train_loss=", "{:.5f}".format(train_avg_loss),
-                      "train_rmse=", "{:.5f}".format(train_rmse),
                       "val_loss=", "{:.5f}".format(val_avg_loss),
-                      "val_rmse=", "{:.5f}".format(val_rmse),
+                      "val_auc=", "{:.5f}".format(val_auc),
+                      "test_auc=", "{:.5f}".format(test_auc),
+                      "sk_test_auc=", "{:.5f}".format(sk_test_auc),
+                      "\t\ttime=", "{:.5f}".format(time.time() - t))
+
+            elif (not SHOWTEST) and VERBOSE:
+                print('[*] Iter: %04d' % (epoch*num_mini_batch + batch_iter),  " Epoch:", '%04d' % epoch,
+                      "minibatch iter:", '%04d' % batch_iter,
+                      "train_loss=", "{:.5f}".format(train_avg_loss),
+                      "val_loss=", "{:.5f}".format(val_avg_loss),
                       "val_auc=", "{:.5f}".format(val_auc),
                       "\t\ttime=", "{:.5f}".format(time.time() - t))
 

@@ -26,7 +26,7 @@ def area_under_curve(preds, labels):
     """
 
     preds = tf.argmax(preds, 1)
-    return tf.contrib.metrics.streaming_auc(labels, preds)
+    return tf.metrics.auc(labels, preds)
 
 
 def expected_rmse(logits, labels, class_values=None):
