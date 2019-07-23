@@ -3,13 +3,15 @@ from __future__ import print_function
 
 import os
 import h5py
+import operator
 import numpy as np
 import pandas as pd
 import cPickle as pkl
 import scipy.sparse as sp
 
-from dti_gcmc.data_utils import load_data, map_data
-
+from collections import Counter
+from data_utils import load_data, map_data
+from sklearn.utils.class_weight import compute_class_weight
 
 def normalize_features(feat):
 
@@ -105,6 +107,9 @@ def sparse_to_tuple(sparse_mx):
 	for the feed_dict where sparse matrices need to be linked to placeholders
 	representing sparse matrices. """
 
+	if type(sparse_mx) == tuple:
+		return sparse_mx[0], sparse_mx[1], sparse_mx[2]
+
 	if not sp.isspmatrix_coo(sparse_mx):
 		sparse_mx = sparse_mx.tocoo()
 	coords = np.vstack((sparse_mx.row, sparse_mx.col)).transpose()
@@ -113,8 +118,66 @@ def sparse_to_tuple(sparse_mx):
 	return coords, values, shape
 
 
+def generate_prob_weights(graph_pos, graph_neg, type):
+	""" Generate probabilities by occurence of
+		either user or item nodes. """
+
+	graph_t = graph_pos.T
+	u_nodes, v_nodes, ratings = graph_t
+
+	prob_weights = list()
+	if type == 'user_based':
+		user_freq = Counter(u_nodes)
+		sorted_users = sorted(user_freq.items(), 
+							key=operator.itemgetter(1))
+
+		users_dict = dict()
+		num_users = len(user_freq.keys())
+		for user, freq in sorted_users:
+			p_of_user = (1./freq) * (1./num_users)
+			users_dict[user] = p_of_user
+
+		all_users = np.unique(graph_neg.T[0])
+		for user in set(all_users) - set(users_dict.keys()):
+			users_dict[user] = 0.0
+
+		for samp in graph_neg:
+			prob_weights.append(users_dict[samp[0]])
+
+		prob_weights[0] += 1. - sum(prob_weights)
+
+		for i in range(len(prob_weights)):
+			if prob_weights[i] < 0:
+				print (prob_weights[i])
+
+		s = 0
+		for i in range(1, len(prob_weights)):
+			s += prob_weights[i]
+
+		print(s)
+
+	elif type == 'item_based':
+
+		item_freq = Counter(v_nodes)
+		sorted_items = sorted(item_freq.items(), 
+							key=operator.itemgetter(1))
+
+		items_dict = dict()
+		num_items = len(item_freq.keys())
+		for item, freq in sorted_items:
+			p_of_item = (1./freq) * (1./num_items)
+			items_dict[item] = p_of_item
+
+		for samp in graph_neg:
+			prob_weights.append(items_dict[samp[1]])
+				
+		prob_weights[0] += 1. - sum(prob_weights)
+
+	return prob_weights
+
 def create_trainvaltest_split(dataset, seed=1234, testing=False, datasplit_path=None, datasplit_from_file=False,
-							  split_type='stratified', verbose=True):
+							  split_type='stratified', sampling_scheme='simple_stratified', neg_sample_size=30000, 
+							  verbose=True):
 	"""
 	Splits data set into train/val/test sets from full bipartite adjacency matrix. Shuffling of dataset is done in
 	load_data function.
@@ -122,258 +185,241 @@ def create_trainvaltest_split(dataset, seed=1234, testing=False, datasplit_path=
 	adjacency matrix.
 	"""
 
+	sampling_scheme = 'simple_stratified'
+
 	if split_type == 'random':
+		u_features, v_features, rating_mx_train, train_labels, u_train_idx, v_train_idx, \
+			val_labels, u_val_idx, v_val_idx, test_labels, u_test_idx, v_test_idx, class_values, \
+			class_weights = random_sampling(dataset, seed, 
+											testing, datasplit_path, 
+											datasplit_from_file, 
+											verbose)
 
-		print ('Using random split...')
-		if datasplit_from_file and os.path.isfile(datasplit_path):
-			print('Reading dataset splits from file...')
-			with open(datasplit_path) as f:
-				num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = pkl.load(f)
-
-			if verbose:
-				print('Number of users = %d' % num_users)
-				print('Number of items = %d' % num_items)
-				print('Number of links = %d' % ratings.shape[0])
-				print('Fraction of positive links = %.4f' % (float(ratings.shape[0]) / (num_users * num_items),))
-
-		else:
-			num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = load_data(dataset, seed=seed,
-																								verbose=verbose)
-
-			with open(datasplit_path, 'w') as f:
-				pkl.dump([num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features], f)
-
-		neutral_rating = -1
-
-		rating_dict = {r: i for i, r in enumerate(np.sort(np.unique(ratings)).tolist())}
-
-		labels = np.full((num_users, num_items), neutral_rating, dtype=np.int32)
-		labels[u_nodes, v_nodes] = np.array([rating_dict[r] for r in ratings])
-		labels = labels.reshape([-1])
-
-		# number of test and validation edges
-		num_test = int(np.ceil(ratings.shape[0] * 0.2))
-		if dataset == 'ml_100k':
-			num_val = int(np.ceil(ratings.shape[0] * 0.8 * 0.1))
-		else:
-			num_val = int(np.ceil(ratings.shape[0] * 0.8 * 0.1))
-
-		num_train = ratings.shape[0] - num_val - num_test
-
-		pairs_nonzero = np.array([[u, v] for u, v in zip(u_nodes, v_nodes)])
-
-		idx_nonzero = np.array([u * num_items + v for u, v in pairs_nonzero])
-
-		train_idx = idx_nonzero[0:num_train]
-		val_idx = idx_nonzero[num_train:num_train + num_val]
-		test_idx = idx_nonzero[num_train + num_val:]
-
-		train_pairs_idx = pairs_nonzero[0:num_train]
-		val_pairs_idx = pairs_nonzero[num_train:num_train + num_val]
-		test_pairs_idx = pairs_nonzero[num_train + num_val:]
-
-		u_test_idx, v_test_idx = test_pairs_idx.transpose()
-		u_val_idx, v_val_idx = val_pairs_idx.transpose()
-		u_train_idx, v_train_idx = train_pairs_idx.transpose()
-
-		# create labels
-		train_labels = labels[train_idx]
-		val_labels = labels[val_idx]
-		test_labels = labels[test_idx]
-
-		if testing:
-			u_train_idx = np.hstack([u_train_idx, u_val_idx])
-			v_train_idx = np.hstack([v_train_idx, v_val_idx])
-			train_labels = np.hstack([train_labels, val_labels])
-			# for adjacency matrix construction
-			train_idx = np.hstack([train_idx, val_idx])
-
-		# make training adjacency matrix
-		rating_mx_train = np.zeros(num_users * num_items, dtype=np.float32)
-		rating_mx_train[train_idx] = labels[train_idx].astype(np.float32) + 1.
-		rating_mx_train = sp.csr_matrix(rating_mx_train.reshape(num_users, num_items))
-
-		class_values = np.sort(np.unique(ratings))
-	
 	elif split_type == 'stratified':
-
-		print('Using stratified split...')
-		np.random.seed(seed)
-
-		if datasplit_from_file and os.path.isfile(datasplit_path):
-			print('Reading dataset splits from file...')
-			with open(datasplit_path) as f:
-				num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = pkl.load(f)
-
-			if verbose:
-				print('Number of users = %d' % num_users)
-				print('Number of items = %d' % num_items)
-				print('Number of links = %d' % ratings.shape[0])
-				print('Fraction of positive links = %.4f' % (float(ratings.shape[0]) / (num_users * num_items),))
-
-		else:
-			num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = load_data(dataset, seed=seed,
-																								verbose=verbose)
-
-		neutral_rating = -1
-
-		rating_dict = {r: i for i, r in enumerate(np.sort(np.unique(ratings)).tolist())}
-
-		labels = np.full((num_users, num_items), neutral_rating, dtype=np.int32)
-		labels[u_nodes, v_nodes] = np.array([rating_dict[r] for r in ratings])
-		labels = labels.reshape([-1])
-
-		graph = [u_nodes, v_nodes, ratings]
-		graph = np.vstack(graph)
-		graph = graph.T
-
-		# Sort based on ratings and split for 0 and 1 ratings
-		graph = graph[graph[:, 2].argsort()]
-		graph_0, graph_1 = np.split(graph, np.where(np.diff(graph[:,2]))[0]+1)
-
-		np.random.shuffle(graph_0)
-		np.random.shuffle(graph_1)
-
-		# Create train-test split
-		train_split = 0.8
-
-		graph_0_train = graph_0[:int(0.8 * graph_0.shape[0])]
-		graph_0_test = graph_0[int(0.8 * graph_0.shape[0]):]
-
-		graph_1_train = graph_1[:int(0.8 * graph_1.shape[0])]
-		graph_1_test = graph_1[int(0.8 * graph_1.shape[0]):]
-
-		try:
-			# Randomly select only 100000 from 0s
-			index = np.random.choice(graph_0_train.shape[0], 100000, replace=False)
-			graph_0_train = graph_0_train[index]
-		except:
-			pass
-
-		# Resample positive samples
-		index = np.random.choice(graph_1_train.shape[0], graph_0_train.shape[0] - graph_1.shape[0], replace=True)
-		graph_1_train_resampled = graph_1_train[index]
-		graph_1_train = np.concatenate([graph_1_train, graph_1_train_resampled], axis=0)
-
-		graph_train = np.concatenate([graph_0_train, graph_1_train], axis=0)
-		graph_test = np.concatenate([graph_0_test, graph_1_test], axis=0)
-
-		np.random.shuffle(graph_train)
-		np.random.shuffle(graph_test)
-
-		# Create train-val split
-		graph_val = graph_train[:int(graph_train.shape[0]*0.1)]
-		graph_train = graph_train[int(graph_train.shape[0]*0.1):]
-
-		train_idx = np.array([u * num_items + v for u, v, _ in graph_train])
-		val_idx = np.array([u * num_items + v for u, v, _ in graph_val])
-
-		u_train_idx, v_train_idx, train_labels = graph_train.T
-		u_test_idx, v_test_idx, test_labels = graph_test.T
-		u_val_idx, v_val_idx, val_labels = graph_val.T
-
-		if testing:
-			u_train_idx = np.hstack([u_train_idx, u_val_idx])
-			v_train_idx = np.hstack([v_train_idx, v_val_idx])
-			train_labels = np.hstack([train_labels, val_labels])
-			# for adjacency matrix construction
-			train_idx = np.hstack([train_idx, val_idx])
-			
-		# make training adjacency matrix
-		rating_mx_train = np.zeros(num_users * num_items, dtype=np.float32)
-		rating_mx_train[train_idx] = labels[train_idx].astype(np.float32) + 1.
-		rating_mx_train = sp.csr_matrix(rating_mx_train.reshape(num_users, num_items))
-
-		class_values = np.sort(np.unique(ratings))
-
-	elif split_type == 'stratified_with_weights':
-
-		print('Using stratified split with class weights...')
-		np.random.seed(seed)
-
-		if datasplit_from_file and os.path.isfile(datasplit_path):
-			print('Reading dataset splits from file...')
-			with open(datasplit_path) as f:
-				num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = pkl.load(f)
-
-			if verbose:
-				print('Number of users = %d' % num_users)
-				print('Number of items = %d' % num_items)
-				print('Number of links = %d' % ratings.shape[0])
-				print('Fraction of positive links = %.4f' % (float(ratings.shape[0]) / (num_users * num_items),))
-
-		else:
-			num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = load_data(dataset, seed=seed,
-																								verbose=verbose)
-
-		neutral_rating = -1
-
-		rating_dict = {r: i for i, r in enumerate(np.sort(np.unique(ratings)).tolist())}
-
-		labels = np.full((num_users, num_items), neutral_rating, dtype=np.int32)
-		labels[u_nodes, v_nodes] = np.array([rating_dict[r] for r in ratings])
-		labels = labels.reshape([-1])
-
-		graph = [u_nodes, v_nodes, ratings]
-		graph = np.vstack(graph)
-		graph = graph.T
-
-		# Sort based on ratings and split for 0 and 1 ratings
-		graph = graph[graph[:, 2].argsort()]
-		graph_0, graph_1 = np.split(graph, np.where(np.diff(graph[:,2]))[0]+1)
-
-		np.random.shuffle(graph_0)
-		np.random.shuffle(graph_1)
-
-		# Create train-test split
-		train_split = 0.8
-
-		graph_0_train = graph_0[:int(0.8 * graph_0.shape[0])]
-		graph_0_test = graph_0[int(0.8 * graph_0.shape[0]):]
-
-		graph_1_train = graph_1[:int(0.8 * graph_1.shape[0])]
-		graph_1_test = graph_1[int(0.8 * graph_1.shape[0]):]
-
-		try:
-			# Randomly select only 100000 from 0s
-			index = np.random.choice(graph_0_train.shape[0], 100000, replace=False)
-			graph_0_train = graph_0_train[index]
-		except:
-			pass
-
-		graph_train = np.concatenate([graph_0_train, graph_1_train], axis=0)
-		graph_test = np.concatenate([graph_0_test, graph_1_test], axis=0)
-
-		np.random.shuffle(graph_train)
-		np.random.shuffle(graph_test)
-
-		# Create train-val split
-		graph_val = graph_train[:int(graph_train.shape[0]*0.1)]
-		graph_train = graph_train[int(graph_train.shape[0]*0.1):]
-
-		train_idx = np.array([u * num_items + v for u, v, _ in graph_train])
-		val_idx = np.array([u * num_items + v for u, v, _ in graph_val])
-
-		u_train_idx, v_train_idx, train_labels = graph_train.T
-		u_test_idx, v_test_idx, test_labels = graph_test.T
-		u_val_idx, v_val_idx, val_labels = graph_val.T
-
-		if testing:
-			u_train_idx = np.hstack([u_train_idx, u_val_idx])
-			v_train_idx = np.hstack([v_train_idx, v_val_idx])
-			train_labels = np.hstack([train_labels, val_labels])
-			# for adjacency matrix construction
-			train_idx = np.hstack([train_idx, val_idx])
-			
-		# make training adjacency matrix
-		rating_mx_train = np.zeros(num_users * num_items, dtype=np.float32)
-		rating_mx_train[train_idx] = labels[train_idx].astype(np.float32) + 1.
-		rating_mx_train = sp.csr_matrix(rating_mx_train.reshape(num_users, num_items))
-
-		class_values = np.sort(np.unique(ratings))
+		u_features, v_features, rating_mx_train, train_labels, u_train_idx, v_train_idx, \
+			val_labels, u_val_idx, v_val_idx, test_labels, u_test_idx, v_test_idx, class_values, \
+			class_weights = stratified_sampling(dataset, sampling_scheme, 
+												neg_sample_size, seed, 
+												testing, datasplit_path, 
+												datasplit_from_file, 
+												verbose)
 
 	else:
-		raise NotImplementedError('Split type not supported.')
+		raise NotImplementedError('Sampling type not supported yet.')
 
 	return u_features, v_features, rating_mx_train, train_labels, u_train_idx, v_train_idx, \
-		val_labels, u_val_idx, v_val_idx, test_labels, u_test_idx, v_test_idx, class_values
+		val_labels, u_val_idx, v_val_idx, test_labels, u_test_idx, v_test_idx, class_values, \
+		class_weights
+
+def random_sampling(dataset, seed=1234, testing=False, 
+				datasplit_path=None, datasplit_from_file=False, 
+				verbose=True):
+	
+	""" Splits the dataset into train, val and test by randomly sampling
+		from the dataset. """
+
+	print ('Using random split...')
+	if datasplit_from_file and os.path.isfile(datasplit_path):
+		print('Reading dataset splits from file...')
+		with open(datasplit_path) as f:
+			num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = pkl.load(f)
+
+		if verbose:
+			print('Number of users = %d' % num_users)
+			print('Number of items = %d' % num_items)
+			print('Number of links = %d' % ratings.shape[0])
+			print('Fraction of positive links = %.4f' % (float(ratings.shape[0]) / (num_users * num_items),))
+
+	else:
+		num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = load_data(dataset, seed=seed,
+																							verbose=verbose)
+
+		with open(datasplit_path, 'w') as f:
+			pkl.dump([num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features], f)
+
+	neutral_rating = -1
+
+	rating_dict = {r: i for i, r in enumerate(np.sort(np.unique(ratings)).tolist())}
+
+	labels = np.full((num_users, num_items), neutral_rating, dtype=np.int32)
+	labels[u_nodes, v_nodes] = np.array([rating_dict[r] for r in ratings])
+	labels = labels.reshape([-1])
+
+	# number of test and validation edges
+	num_test = int(np.ceil(ratings.shape[0] * 0.2))
+	if dataset == 'ml_100k':
+		num_val = int(np.ceil(ratings.shape[0] * 0.8 * 0.1))
+	else:
+		num_val = int(np.ceil(ratings.shape[0] * 0.8 * 0.1))
+
+	num_train = ratings.shape[0] - num_val - num_test
+
+	pairs_nonzero = np.array([[u, v] for u, v in zip(u_nodes, v_nodes)])
+
+	idx_nonzero = np.array([u * num_items + v for u, v in pairs_nonzero])
+
+	train_idx = idx_nonzero[0:num_train]
+	val_idx = idx_nonzero[num_train:num_train + num_val]
+	test_idx = idx_nonzero[num_train + num_val:]
+
+	train_pairs_idx = pairs_nonzero[0:num_train]
+	val_pairs_idx = pairs_nonzero[num_train:num_train + num_val]
+	test_pairs_idx = pairs_nonzero[num_train + num_val:]
+
+	u_test_idx, v_test_idx = test_pairs_idx.transpose()
+	u_val_idx, v_val_idx = val_pairs_idx.transpose()
+	u_train_idx, v_train_idx = train_pairs_idx.transpose()
+
+	# create labels
+	train_labels = labels[train_idx]
+	val_labels = labels[val_idx]
+	test_labels = labels[test_idx]
+
+	if testing:
+		u_train_idx = np.hstack([u_train_idx, u_val_idx])
+		v_train_idx = np.hstack([v_train_idx, v_val_idx])
+		train_labels = np.hstack([train_labels, val_labels])
+		# for adjacency matrix construction
+		train_idx = np.hstack([train_idx, val_idx])
+
+	# make training adjacency matrix
+	rating_mx_train = np.zeros(num_users * num_items, dtype=np.float32)
+	rating_mx_train[train_idx] = labels[train_idx].astype(np.float32) + 1.
+	rating_mx_train = sp.csr_matrix(rating_mx_train.reshape(num_users, num_items))
+
+	class_values = np.sort(np.unique(ratings))
+	class_weights = compute_class_weight("balanced", class_values, np.concatenate([train_labels, 
+		test_labels], axis=0))
+
+	return u_features, v_features, rating_mx_train, train_labels, u_train_idx, v_train_idx, \
+		val_labels, u_val_idx, v_val_idx, test_labels, u_test_idx, v_test_idx, class_values, \
+		class_weights
+
+def stratified_sampling(dataset, sampling_scheme, neg_sample_size, 
+				seed=1234, testing=False, datasplit_path=None, 
+				datasplit_from_file=False, verbose=True):
+
+	""" Splits the dataset into train, val and test by drawing
+		stratified samples from it.
+
+		:params sampling_scheme: Defines the scheme used for
+			sampling. Available types are:
+			['simple_stratified', 'oversample', 'user_based', 'item_based'] 
+
+		Taken from Pan et al. (2008). """
+
+	sampling_scheme = 'user_based'
+
+	np.random.seed(seed)
+
+	if datasplit_from_file and os.path.isfile(datasplit_path):
+		print('Reading dataset splits from file...')
+		with open(datasplit_path) as f:
+			num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = pkl.load(f)
+
+		if verbose:
+			print('Number of users = %d' % num_users)
+			print('Number of items = %d' % num_items)
+			print('Number of links = %d' % ratings.shape[0])
+			print('Fraction of positive links = %.4f' % (float(ratings.shape[0]) / (num_users * num_items),))
+
+	else:
+		num_users, num_items, u_nodes, v_nodes, ratings, u_features, v_features = load_data(dataset, seed=seed,
+																							verbose=verbose)
+
+	neutral_rating = -1
+
+	rating_dict = {r: i for i, r in enumerate(np.sort(np.unique(ratings)).tolist())}
+
+	labels = np.full((num_users, num_items), neutral_rating, dtype=np.int32)
+	labels[u_nodes, v_nodes] = np.array([rating_dict[r] for r in ratings])
+	labels = labels.reshape([-1])
+
+	graph = [u_nodes, v_nodes, ratings]
+	graph = np.vstack(graph)
+	graph = graph.T
+
+	# Sort based on ratings and split for 0 and 1 ratings
+	graph = graph[graph[:, 2].argsort()]
+	graph_0, graph_1 = np.split(graph, np.where(np.diff(graph[:,2]))[0]+1)
+
+	np.random.shuffle(graph_0)
+	np.random.shuffle(graph_1)
+
+	# Create train-test split
+	train_split = 0.8
+
+	graph_0_train = graph_0[:int(0.8 * graph_0.shape[0])]
+	graph_0_test = graph_0[int(0.8 * graph_0.shape[0]):]
+
+	graph_1_train = graph_1[:int(0.8 * graph_1.shape[0])]
+	graph_1_test = graph_1[int(0.8 * graph_1.shape[0]):]
+
+	if graph_0_train.shape[0] < neg_sample_size:
+		err = 'Size of negative sample is higher than no. of negative samples in train set.'
+		raise ValueError(err)
+
+	if sampling_scheme == 'simple_stratified':
+		print('Using simple stratified split...')
+
+	elif sampling_scheme == 'oversample':
+		print('Using stratified split with oversampling...')
+		index = np.random.choice(graph_0_train.shape[0], neg_sample_size, replace=False)
+		graph_0_train = graph_0_train[index]
+
+	elif sampling_scheme == 'user_based':
+		print('Using user-based stratified split...')
+		print (graph_0_train, graph_1_train)
+
+		prob_weights = generate_prob_weights(graph_1_train, graph_0_train, 'user_based')
+		index = np.random.choice(graph_0_train.shape[0], neg_sample_size, p=prob_weights, 
+				replace=False)
+		graph_0_train = graph_0_train[index]
+
+	elif sampling_scheme == 'item_based':
+		print('Using item-based stratified split...')
+		prob_weights = generate_prob_weights(graph_1_train, graph_0_train, 'item_based')
+		index = np.random.choice(graph_0_train.shape[0], neg_sample_size, p=prob_weights, 
+				replace=False)
+		graph_0_train = graph_0_train[index]
+
+	else:
+		raise NotImplementedError('Sampling scheme not supported yet.')
+
+
+	graph_train = np.concatenate([graph_0_train, graph_1_train], axis=0)
+	graph_test = np.concatenate([graph_0_test, graph_1_test], axis=0)
+
+	np.random.shuffle(graph_train)
+	np.random.shuffle(graph_test)
+
+	# Create train-val split
+	graph_val = graph_train[:int(graph_train.shape[0]*0.1)]
+	graph_train = graph_train[int(graph_train.shape[0]*0.1):]
+
+	train_idx = np.array([u * num_items + v for u, v, _ in graph_train])
+	val_idx = np.array([u * num_items + v for u, v, _ in graph_val])
+
+	u_train_idx, v_train_idx, train_labels = graph_train.T
+	u_test_idx, v_test_idx, test_labels = graph_test.T
+	u_val_idx, v_val_idx, val_labels = graph_val.T
+
+	if testing:
+		u_train_idx = np.hstack([u_train_idx, u_val_idx])
+		v_train_idx = np.hstack([v_train_idx, v_val_idx])
+		train_labels = np.hstack([train_labels, val_labels])
+		# for adjacency matrix construction
+		train_idx = np.hstack([train_idx, val_idx])
+		
+	# make training adjacency matrix
+	rating_mx_train = np.zeros(num_users * num_items, dtype=np.float32)
+	rating_mx_train[train_idx] = labels[train_idx].astype(np.float32) + 1.
+	rating_mx_train = sp.csr_matrix(rating_mx_train.reshape(num_users, num_items))
+
+	class_values = np.sort(np.unique(ratings))
+	class_weights = compute_class_weight("balanced", class_values, np.concatenate([train_labels, 
+		test_labels], axis=0))
+
+	return u_features, v_features, rating_mx_train, train_labels, u_train_idx, v_train_idx, \
+	val_labels, u_val_idx, v_val_idx, test_labels, u_test_idx, v_test_idx, class_values, \
+	class_weights

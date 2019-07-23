@@ -1,7 +1,7 @@
 from __future__ import print_function
 
 import tensorflow as tf
-from dti_gcmc.initializations import *
+from initializations import *
 
 import warnings
 warnings.filterwarnings('ignore')

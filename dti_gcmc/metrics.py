@@ -26,7 +26,7 @@ def area_under_curve(preds, labels):
     """
 
     preds = tf.argmax(preds, 1)
-    return tf.metrics.auc(labels, preds)
+    return tf.metrics.auc(labels, preds, summation_method='careful_interpolation')
 
 
 def expected_rmse(logits, labels, class_values=None):
@@ -81,23 +81,25 @@ def rmse(logits, labels, class_values=None):
 
     return tf.sqrt(tf.reduce_mean(mse))
 
-def generate_weights(x, class_weights):
-    """ Makes an replaces x according to its
-        corresponding class weight. """
-
-    if x == 0:
-        return class_weights[0]
-
-    return class_weights[1]
-
 def softmax_cross_entropy(outputs, labels, class_weights, 
                                 use_class_weights=False):
     """ computes average softmax cross entropy """
 
-    weights = tf.map_fn(lambda x: generate_weights(x, class_weights), 
-        labels, dtype=tf.float32)
+    if use_class_weights:
+        logits = outputs
 
-    loss = tf.losses.sparse_softmax_cross_entropy(labels, outputs, 
-        weights=weights)
+        one_hot_labels = tf.one_hot(indices=labels, depth=2)
+        weights = tf.reduce_sum(class_weights * one_hot_labels, axis=1)
 
-    return tf.reduce_mean(loss)
+        unweighted_losses = tf.nn.softmax_cross_entropy_with_logits_v2(
+            labels=one_hot_labels, logits=logits)
+
+        weighted_losses = unweighted_losses * weights
+        loss = tf.reduce_mean(weighted_losses)
+
+    else:
+        loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, 
+            logits=outputs)
+        loss = tf.reduce_mean(loss)
+
+    return loss

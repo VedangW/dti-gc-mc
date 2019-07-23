@@ -1,6 +1,7 @@
 README.md
 setup.py
 dti_gcmc/__init__.py
+dti_gcmc/batch_generator.py
 dti_gcmc/data_utils.py
 dti_gcmc/initializations.py
 dti_gcmc/layers.py
@@ -10,6 +11,7 @@ dti_gcmc/preprocessing.py
 dti_gcmc/process_data.py
 dti_gcmc/train.py
 dti_gcmc/train_mini_batch.py
+dti_gcmc/train_sparse.py
 dti_gcmc/utils.py
 dti_gcmc.egg-info/PKG-INFO
 dti_gcmc.egg-info/SOURCES.txt

@@ -1,7 +1,7 @@
 from __future__ import print_function
 
-from dti_gcmc.layers import *
-from dti_gcmc.metrics import softmax_accuracy, \
+from layers import *
+from metrics import softmax_accuracy, \
 		expected_rmse, softmax_cross_entropy, \
 		area_under_curve
 
@@ -286,6 +286,11 @@ class RecommenderSideInfoGAE(Model):
         self.loss += softmax_cross_entropy(self.outputs, self.labels, 
             self.class_weights, self.use_class_weights)
 
+        # alpha = 0.001
+
+        # for var in self.vars:
+        # 	self.loss += alpha * tf.nn.l2_loss(self.vars[var])
+
         tf.summary.scalar('loss', self.loss)
 
     def _accuracy(self):
@@ -347,6 +352,27 @@ class RecommenderSideInfoGAE(Model):
 
         self.layers.append(Dense(input_dim=self.hidden[0]+self.feat_hidden_dim,
                                  output_dim=self.hidden[1],
+                                 act=self.activation_function,
+                                 dropout=self.dropout,
+                                 logging=self.logging,
+                                 share_user_item_weights=False))
+
+        self.layers.append(Dense(input_dim=self.hidden[1],
+                                 output_dim=self.hidden[2],
+                                 act=self.activation_function,
+                                 dropout=self.dropout,
+                                 logging=self.logging,
+                                 share_user_item_weights=False))
+
+        self.layers.append(Dense(input_dim=self.hidden[2],
+                                 output_dim=self.hidden[3],
+                                 act=self.activation_function,
+                                 dropout=self.dropout,
+                                 logging=self.logging,
+                                 share_user_item_weights=False))
+
+        self.layers.append(Dense(input_dim=self.hidden[3],
+                                 output_dim=self.hidden[3],
                                  act=lambda x: x,
                                  dropout=self.dropout,
                                  logging=self.logging,
@@ -355,7 +381,7 @@ class RecommenderSideInfoGAE(Model):
         self.layers.append(BilinearMixture(num_classes=self.num_classes,
                                            u_indices=self.u_indices,
                                            v_indices=self.v_indices,
-                                           input_dim=self.hidden[1],
+                                           input_dim=self.hidden[3],
                                            num_users=self.num_users,
                                            num_items=self.num_items,
                                            user_item_bias=False,

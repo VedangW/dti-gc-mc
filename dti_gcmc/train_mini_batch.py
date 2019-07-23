@@ -15,11 +15,11 @@ warnings.filterwarnings('ignore')
 
 from sklearn.metrics import roc_auc_score
 
-from dti_gcmc.preprocessing import create_trainvaltest_split, \
+from preprocessing import create_trainvaltest_split, \
     sparse_to_tuple, preprocess_user_item_features, globally_normalize_bipartite_adjacency
-from dti_gcmc.model import RecommenderGAE
-from dti_gcmc.utils import construct_feed_dict
-from dti_gcmc.data_utils import data_iterator
+from model import RecommenderGAE
+from utils import construct_feed_dict
+from data_utils import data_iterator
 
 
 # Set random seed
@@ -30,8 +30,8 @@ tf.set_random_seed(seed)
 
 # Settings
 ap = argparse.ArgumentParser()
-ap.add_argument("-d", "--dataset", type=str, default="dataset_2", 
-                choices=['dataset_1', 'dataset_2'],
+ap.add_argument("-d", "--dataset", type=str, default='data_2_small',
+                choices=['data_1', 'data_2', 'data_1_small', 'data_2_small'],
                 help="Dataset string.")
 
 ap.add_argument("-lr", "--learning_rate", type=float, default=0.01,
@@ -81,6 +81,10 @@ ap.add_argument("-cw", "--class_weights", type=float, nargs=2, default=[1., 25.]
 
 ap.add_argument("-sht", "--show_test_results",
                 help="Callback to show continuous results on the test set.", 
+                action='store_true')
+
+ap.add_argument("-acw", "--automatic_class_weights",
+                help="Generate class weights automatically.", 
                 action='store_true')
 
 # Boolean flags
@@ -151,6 +155,7 @@ STYPE = args['split_type']
 USE_CLASS_WEIGHTS = args['use_class_weights']
 CLASS_WEIGHTS = args['class_weights']
 SHOWTEST = args['show_test_results']
+AUTO_CW = args['automatic_class_weights']
 
 CLASS_WEIGHTS = np.array(CLASS_WEIGHTS).astype('float32')
 
@@ -162,19 +167,28 @@ NUMCLASSES = 2
 
 # Splitting dataset in training, validation and test set
 
-if DATASET == 'dataset_1':
-    datasplit_path = 'data/' + DATASET + '/dataset_1.pickle'
-elif DATASET == 'dataset_2':
-    datasplit_path = 'data/' + DATASET + '/dataset_2.pickle'
+if DATASET == 'data_1':
+    datasplit_path = 'data/' + DATASET + '/data_1.pickle'
+elif DATASET == 'data_2':
+    datasplit_path = 'data/' + DATASET + '/data_2.pickle'
+elif DATASET == 'data_1_small':
+    datasplit_path = 'data/' + DATASET + '/data_1_small.pickle'
+elif DATASET == 'data_2_small':
+    datasplit_path = 'data/' + DATASET + '/data_2_small.pickle'
 else:
     raise ValueError('Dataset not recognized.')
 
 
+
 u_features, v_features, adj_train, train_labels, train_u_indices, train_v_indices, \
 val_labels, val_u_indices, val_v_indices, test_labels, \
-test_u_indices, test_v_indices, class_values = create_trainvaltest_split(DATASET, DATASEED, TESTING,
+test_u_indices, test_v_indices, class_values, class_weights = create_trainvaltest_split(DATASET, DATASEED, TESTING,
                                                                          datasplit_path, SPLITFROMFILE, 
                                                                          STYPE, VERBOSE)
+
+if AUTO_CW:
+    CLASS_WEIGHTS = class_weights
+    print ('Using auto-generated class weights.')
 
 # num_mini_batch = np.int(np.ceil(train_labels.shape[0]/float(BATCHSIZE)))
 num_mini_batch = train_labels.shape[0]//BATCHSIZE
@@ -372,7 +386,7 @@ for epoch in range(NB_EPOCH):
                                                                               feed_dict=val_feed_dict)
 
             if SHOWTEST:
-                test_avg_loss, test_rmse, test_accuracy, test_auc_with_op, outputs, labels = sess.run([model.loss, 
+                test_avg_loss, test_rmse, test_accuracy, test_auc_with_op, test_outputs, test_labels = sess.run([model.loss, 
                                                                                       model.rmse, 
                                                                                       model.accuracy, 
                                                                                       model.auc, 
@@ -383,21 +397,34 @@ for epoch in range(NB_EPOCH):
                 test_auc, update_op = test_auc_with_op
 
             val_auc, update_op = auc
-            outputs = sess.run(tf.argmax(outputs, 1))
+            
             iteration_time = time.time() - t
             total_time += iteration_time
 
-            sk_test_auc = roc_auc_score(labels, outputs)
+            if SHOWTEST:
+                test_outputs = sess.run(tf.argmax(test_outputs, 1))
+
+                # tp, fp, tn, fn = 0, 0, 0, 0
+                # for i in range(len(test_outputs)):
+                #     if test_outputs[i] == 1 and test_labels[i] == 1:
+                #         tp += 1
+                #     elif test_outputs[i] == 1 and test_labels[i] != 1:
+                #         fp += 1
+                #     elif test_outputs[i] == 0 and test_labels[i] == 0:
+                #         tn += 1
+                #     elif test_outputs[i] == 0 and test_labels[i] != 0:
+                #         fn += 1
+
+                sk_test_auc = roc_auc_score(test_labels, test_outputs)
 
             if SHOWTEST and VERBOSE:
                 print('[*] Iter: %04d' % (epoch*num_mini_batch + batch_iter),  " Epoch:", '%04d' % epoch,
                       "minibatch iter:", '%04d' % batch_iter,
-                      "train_loss=", "{:.5f}".format(train_avg_loss),
-                      "val_loss=", "{:.5f}".format(val_avg_loss),
                       "val_auc=", "{:.5f}".format(val_auc),
                       "test_auc=", "{:.5f}".format(test_auc),
                       "sk_test_auc=", "{:.5f}".format(sk_test_auc),
-                      "\t\ttime=", "{:.5f}".format(time.time() - t))
+                      # "tp=", tp, "fp=", fp, "tn=", tn, "fn=", fn, 
+                      "\ttime=", "{:.5f}".format(time.time() - t))
 
             elif (not SHOWTEST) and VERBOSE:
                 print('[*] Iter: %04d' % (epoch*num_mini_batch + batch_iter),  " Epoch:", '%04d' % epoch,
@@ -475,13 +502,16 @@ if TESTING:
                                                                                   model.labels], 
                                                                                   feed_dict=test_feed_dict)
 
-    test_auc, update_op = test_auc_with_op
+    # test_auc, update_op = test_auc_with_op
+
+    outputs = outputs[:, 1]
+    sk_test_auc = roc_auc_score(labels, outputs)
 
     print('')
     print('test loss = ', test_avg_loss)
     print('test rmse = ', test_rmse)
     print('test accuracy =', test_accuracy)
-    print('test auc =', test_auc)
+    print('test auc =', sk_test_auc)
     print('test update_op =', update_op)
 
     # restore with polyak averages of parameters

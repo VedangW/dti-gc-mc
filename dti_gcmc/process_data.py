@@ -8,7 +8,6 @@ import scipy.sparse as sp
 from tqdm import tqdm
 from scipy.io import loadmat
 
-
 def get_data_from_txt_file(fpath, adj=False):
 	""" Get data from the file fpath
 		in needed format. """
@@ -38,6 +37,9 @@ ap.add_argument("-d", "--dataset", type=str, default='dataset_2',
 ap.add_argument("-s", "--subset",
 				help="Set true to subset.", action='store_true')
 
+ap.add_argument("-ns", "--neg_size", type=int, default=100000,
+				help="Number of negative samples to choose.")
+
 ap.add_argument("-v", "--verbose",
 				help="Set true to print details of graph.", 
 				action='store_true')
@@ -48,6 +50,7 @@ args = ap.parse_args()
 DATASET = args.dataset
 SUBSET = args.subset
 VERBOSE = args.verbose
+NEGSIZE = args.neg_size
 
 data_repo = 'data/dti_data/'
 store_repo = 'data/dti_store/'
@@ -116,7 +119,7 @@ if SUBSET:
 	graph_0, graph_1 = np.split(graph, np.where(np.diff(graph[:,2]))[0]+1)
 
 	# Randomly select only 100000 from 0s
-	index = np.random.choice(graph_0.shape[0], 100000, replace=False)
+	index = np.random.choice(graph_0.shape[0], NEGSIZE, replace=False)
 	graph_0 = graph_0[index]
 
 	# Recombine graph

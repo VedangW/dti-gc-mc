@@ -97,21 +97,25 @@ def load_data(fname, seed=1234, verbose=True):
 	print('Loading dataset', fname)
 
 	data_dir = 'data/' + fname
+	store_repo = 'data/dti_store/'
 
-
-	if fname == 'dataset_1':
-		store_repo = 'data/dti_store/'
-
-		with open(store_repo + 'graph_1.pkl') as f:
+	if fname == 'data_1':
+		with open(store_repo + 'data_1.pkl') as f:
 			graph_info = pickle.load(f)
 
 		num_users, num_items, u_nodes_ratings, \
 		v_nodes_ratings, ratings, u_features, \
 		v_features = graph_info
 
-	elif fname == 'dataset_2':
-		store_repo = 'data/dti_store/'
+	elif fname == 'data_2':
+		with open(store_repo + 'data_2.pkl') as f:
+			graph_info = pickle.load(f)
 
+		num_users, num_items, u_nodes_ratings, \
+		v_nodes_ratings, ratings, u_features, \
+		v_features = graph_info
+
+	elif fname == 'data_2_small':
 		with open(store_repo + 'graph_2.pkl') as f:
 			graph_info = pickle.load(f)
 
